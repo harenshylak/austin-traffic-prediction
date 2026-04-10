@@ -1,0 +1,66 @@
+# HM-STGN Default Hyperparameters
+# All experiment configs override only the keys they change.
+
+model:
+  d_model: 64              # Shared embedding dimension across all modules
+  dropout: 0.1
+
+  patch_transformer:
+    n_layers: 2
+    n_heads: 4
+    patch_size: 2          # 2 timesteps per patch → 6 patches from T=12
+    feedforward_dim: 256
+
+  gatv2:
+    n_layers: 2
+    n_heads: 4
+
+  adaptive_graph:
+    d_embed: 16
+    alpha_init: 0.5        # Learnable blend: alpha*A_static + (1-alpha)*A_adaptive
+
+  context_encoder:
+    hidden_dim: 128        # MLP: (T*K) → 128 → 64 → d_model
+
+  prediction_heads:
+    loss_weight_speed: 0.5
+    loss_weight_congestion: 0.25
+    loss_weight_anomaly: 0.25
+
+data:
+  T: 12                    # Input timesteps (60 min at 5-min resolution)
+  H: 12                    # Max prediction horizon (60 min); eval at 3, 6, 12
+  N: 50                    # Number of sensor nodes
+  F: 3                     # Input features: speed, volume, occupancy
+  eval_horizons: [3, 6, 12]  # 15 min, 30 min, 60 min
+
+  splits:
+    train_start: "2022-01-01"
+    train_end:   "2022-10-31"
+    val_start:   "2022-11-01"
+    val_end:     "2022-12-31"
+    test_start:  "2023-01-01"
+    test_end:    "2023-12-31"
+
+  missing_threshold: 0.20  # Drop sensors with >20% missing data
+  gap_fill_limit: 3        # Forward-fill gaps up to 15 min (3 × 5-min steps)
+
+training:
+  optimizer: adamw
+  lr: 0.001
+  weight_decay: 0.0001
+  batch_size: 32
+  max_epochs: 100
+  early_stopping_patience: 10   # On val MAE
+  grad_clip_norm: 5.0
+
+  lr_scheduler:
+    name: ReduceLROnPlateau
+    factor: 0.5
+    patience: 5
+
+paths:
+  raw_dir:       "data/raw"
+  processed_dir: "data/processed"
+  graph_dir:     "data/graph"
+  checkpoint_dir: "checkpoints"

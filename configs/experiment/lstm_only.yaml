@@ -1,0 +1,13 @@
+# Layer 0: LSTM-only baseline (no graph, no context)
+# Overrides only what differs from default.yaml
+
+_base_: "../default.yaml"
+
+model:
+  name: lstm_only
+  use_graph: false
+  use_context: false
+
+training:
+  batch_size: 64
+  max_epochs: 50

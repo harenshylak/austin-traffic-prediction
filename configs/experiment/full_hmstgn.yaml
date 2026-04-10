@@ -1,0 +1,15 @@
+# Full HM-STGN: all components enabled
+
+_base_: "../default.yaml"
+
+model:
+  name: full_hmstgn
+  use_graph: true
+  use_adaptive_graph: true
+  use_context: true
+  use_cross_attention_fusion: true
+  use_multitask_heads: true
+
+training:
+  batch_size: 32
+  max_epochs: 100
