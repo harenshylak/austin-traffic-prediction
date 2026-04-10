@@ -24,8 +24,8 @@ API_URL = "https://archive-api.open-meteo.com/v1/archive"
 PARAMS = {
     "latitude": AUSTIN_LAT,
     "longitude": AUSTIN_LON,
-    "start_date": "2022-01-01",
-    "end_date": "2023-12-31",
+    "start_date": "2020-01-01",
+    "end_date": "2021-12-31",
     "hourly": ",".join([
         "temperature_2m",
         "precipitation",

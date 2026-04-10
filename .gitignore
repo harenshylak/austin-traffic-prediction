@@ -1,7 +1,8 @@
-# Data (large files — don't commit raw/processed data)
-data/raw/
-data/processed/
-data/graph/*.npy
+# Data (large files — regenerate via scripts)
+data/
+
+# Cache (API response cache)
+cache/
 
 # Model checkpoints
 checkpoints/
@@ -22,3 +23,6 @@ venv/
 
 # Wandb
 wandb/
+
+# VS Code
+.vscode/

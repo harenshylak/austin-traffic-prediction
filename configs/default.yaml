@@ -18,6 +18,7 @@ model:
   adaptive_graph:
     d_embed: 16
     alpha_init: 0.5        # Learnable blend: alpha*A_static + (1-alpha)*A_adaptive
+    sigma_m: 5000          # Gaussian kernel bandwidth in metres for road-network distances
 
   context_encoder:
     hidden_dim: 128        # MLP: (T*K) → 128 → 64 → d_model
@@ -35,15 +36,15 @@ data:
   eval_horizons: [3, 6, 12]  # 15 min, 30 min, 60 min
 
   splits:
-    train_start: "2022-01-01"
-    train_end:   "2022-10-31"
-    val_start:   "2022-11-01"
-    val_end:     "2022-12-31"
-    test_start:  "2023-01-01"
-    test_end:    "2023-12-31"
+    train_start: "2020-04-01"   # Jan-Mar 2020 excluded: sensors fully imputed (std=0.69)
+    train_end:   "2021-03-31"
+    val_start:   "2021-04-01"
+    val_end:     "2021-06-30"
+    test_start:  "2021-07-01"
+    test_end:    "2021-09-30"   # Oct-Dec 2021 excluded: sensors fully imputed (std=0.69)
 
-  missing_threshold: 0.20  # Drop sensors with >20% missing data
-  gap_fill_limit: 3        # Forward-fill gaps up to 15 min (3 × 5-min steps)
+  missing_threshold: 0.50  # Drop sensors with >50% missing at 15-min resolution
+  gap_fill_limit: 4        # Forward-fill up to 4 consecutive missing 15-min readings (1 hour)
 
 training:
   optimizer: adamw

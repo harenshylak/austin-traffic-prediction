@@ -11,5 +11,5 @@ model:
   use_multitask_heads: true
 
 training:
-  batch_size: 32
+  batch_size: 128
   max_epochs: 100
