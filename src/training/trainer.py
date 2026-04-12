@@ -85,6 +85,9 @@ def build_model(cfg: dict, N: int = None) -> nn.Module:
     if model_name == "gcn_lstm":
         from src.models.gcn_lstm import build_from_config
         return build_from_config(cfg)
+    if model_name == "lstm_context":
+        from src.models.lstm_context import build_from_config
+        return build_from_config(cfg)
     if model_name == "full_hmstgn":
         from src.models.hmstgn import build_from_config
         if N is None:
@@ -121,9 +124,10 @@ def run_epoch(
 
     # Detect model type by forward signature
     import inspect
-    sig_params = set(inspect.signature(model.forward).parameters.keys())
-    is_hmstgn  = "context" in sig_params       # full HM-STGN
-    needs_adj  = "adjacency" in sig_params      # GCN-based models
+    sig_params     = set(inspect.signature(model.forward).parameters.keys())
+    is_hmstgn      = "event_flag" in sig_params               # full HM-STGN
+    is_lstm_ctx    = "context" in sig_params and not is_hmstgn # LSTMWithContext
+    needs_adj      = "adjacency" in sig_params and not is_hmstgn  # GCN-based
 
     ctx = torch.enable_grad() if is_train else torch.no_grad()
     with ctx:
@@ -139,6 +143,12 @@ def run_epoch(
                 out  = model(traffic, context, adjacency, event_flag, target=target)
                 loss = out["loss"]
                 preds = out["pred_speed"]
+
+            elif is_lstm_ctx:
+                context = batch["context"].to(device)        # (B, T, K)
+                tfr = teacher_forcing_ratio if is_train else 0.0
+                preds = model(traffic, context, target=target, teacher_forcing_ratio=tfr)
+                loss = nn.HuberLoss(delta=1.0)(preds, target)
 
             elif needs_adj:
                 adjacency = batch["adjacency"].to(device)

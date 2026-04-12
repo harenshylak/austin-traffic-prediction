@@ -1,0 +1,15 @@
+# Ablation C: Sensor + Weather + Events
+# Full context: 6 weather + 7 calendar + 2 special-event features.
+# This is the complete context signal used by the full HM-STGN.
+
+_base_: "../default.yaml"
+
+model:
+  name: lstm_context
+
+data:
+  K: 15   # all context cols: weather(6) + calendar(7) + events(2)
+
+training:
+  batch_size: 64
+  max_epochs: 100

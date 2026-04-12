@@ -1,0 +1,15 @@
+# Ablation B: Sensor + Weather
+# Adds 6 weather features (temp, precip, wind, humidity, cloud, visibility)
+# on top of the LSTM baseline. No calendar or event data.
+
+_base_: "../default.yaml"
+
+model:
+  name: lstm_context
+
+data:
+  K: 6   # weather cols only (cols 0-5 of context array)
+
+training:
+  batch_size: 64
+  max_epochs: 100

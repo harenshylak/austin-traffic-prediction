@@ -47,13 +47,15 @@ class TrafficDataset(Dataset):
         adj: np.ndarray,
         T: int,
         H: int,
+        K: int | None = None,
         speed_idx: int = 0,
     ):
         self.traffic   = traffic    # (T_split, N, F)
-        self.context   = context    # (T_split, K)
+        self.context   = context    # (T_split, K_full)
         self.adj       = torch.from_numpy(adj).float()
         self.T         = T
         self.H         = H
+        self.K         = K if K is not None else context.shape[1]  # cols to expose
         self.speed_idx = speed_idx
 
         # Number of valid windows
@@ -65,8 +67,12 @@ class TrafficDataset(Dataset):
             )
 
         # Pre-compute event_flag per position: 1 if any event_flag > 0 in [i, i+T)
-        # events are the last 2 columns of context (event_flag, event_impact)
-        event_col = context[:, -2]  # event_flag column
+        # Event flag is always at absolute col index 13 (weather=6, calendar=7, then events).
+        # If the full context doesn't reach col 13, no events → flags all zero.
+        if context.shape[1] > 13:
+            event_col = context[:, 13]  # absolute index; safe regardless of K
+        else:
+            event_col = np.zeros(len(context), dtype=np.float32)
         self._event_flags = self._compute_window_events(event_col, T)
 
     @staticmethod
@@ -85,8 +91,8 @@ class TrafficDataset(Dataset):
         t1 = idx + self.T          # exclusive end of input
         t2 = idx + self.T + self.H # exclusive end of target
 
-        traffic_window = torch.from_numpy(self.traffic[t0:t1]).float()    # (T, N, F)
-        context_window = torch.from_numpy(self.context[t0:t1]).float()    # (T, K)
+        traffic_window = torch.from_numpy(self.traffic[t0:t1]).float()           # (T, N, F)
+        context_window = torch.from_numpy(self.context[t0:t1, :self.K]).float() # (T, K)
         target_window  = torch.from_numpy(                                 # (H, N, 1)
             self.traffic[t1:t2, :, self.speed_idx : self.speed_idx + 1]
         ).float()
@@ -148,6 +154,7 @@ def make_dataloaders(
     graph_dir  = cfg["paths"]["graph_dir"]
     T          = cfg["data"]["T"]
     H          = cfg["data"]["H"]
+    K          = cfg["data"].get("K", None)   # None = use all context cols
     batch_size = cfg["training"]["batch_size"]
 
     # Load shared data
@@ -168,7 +175,7 @@ def make_dataloaders(
         traffic_split = np.array(traffic_full[s : t_end + 1])
         context_split = np.array(context_full[s : t_end + 1])
 
-        dataset = TrafficDataset(traffic_split, context_split, adj, T, H)
+        dataset = TrafficDataset(traffic_split, context_split, adj, T, H, K=K)
 
         shuffle = (split == "train")
         loaders[split] = DataLoader(

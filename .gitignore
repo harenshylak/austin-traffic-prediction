@@ -1,5 +1,5 @@
 # Data (large files — regenerate via scripts)
-data/
+/data/
 
 # Cache (API response cache)
 cache/

@@ -1,0 +1,28 @@
+{
+  "run_id": "20260411_193632",
+  "model": "arima_2_1_2",
+  "arima_order": [
+    2,
+    1,
+    2
+  ],
+  "config": "configs/default.yaml",
+  "n_sensors": 10,
+  "test_metrics": {
+    "15min": {
+      "mae": 3.2761,
+      "rmse": 8.5013,
+      "mape": 7.8386
+    },
+    "30min": {
+      "mae": 3.5424,
+      "rmse": 9.0206,
+      "mape": 8.4623
+    },
+    "60min": {
+      "mae": 3.9143,
+      "rmse": 9.8026,
+      "mape": 9.2996
+    }
+  }
+}
