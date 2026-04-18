@@ -138,6 +138,8 @@ class LSTMWithContext(nn.Module):
             pred = self.head(out)                                # (B*N, 1, 1)
             preds.append(pred)
 
+            # Teacher forcing: ratio=0.5 during training, 0.0 at val/test.
+            # Fully autoregressive inference introduces exposure bias — see lstm_baseline.py.
             if target is not None and torch.rand(1).item() < teacher_forcing_ratio:
                 gt = target[:, step, :, 0:1]
                 dec_input = gt.permute(0, 2, 1).reshape(B * N, 1, 1)

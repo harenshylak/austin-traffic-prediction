@@ -100,7 +100,12 @@ class LSTMBaseline(nn.Module):
             pred = self.head(out)                                 # (B*N, 1, 1)
             preds.append(pred)
 
-            # Next decoder input: teacher forcing or own prediction
+            # Teacher forcing: during training (ratio=0.5), each step independently
+            # uses ground-truth speed as the next input with probability=ratio.
+            # During validation/test (ratio=0.0) the decoder is fully autoregressive —
+            # each prediction feeds the next step. This train–test mismatch (exposure
+            # bias) causes errors to compound across the H=12 horizon, which is why
+            # MAE grows faster with horizon than a per-step error rate would predict.
             if target is not None and torch.rand(1).item() < teacher_forcing_ratio:
                 gt = target[:, step, :, 0:1]                        # (B, N, 1)
                 dec_input = gt.permute(0, 2, 1).reshape(B * N, 1, 1)
