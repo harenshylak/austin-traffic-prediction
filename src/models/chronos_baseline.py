@@ -48,7 +48,7 @@ def evaluate(
     config_path: str = "configs/default.yaml",
     model_id: str = "amazon/chronos-t5-base",
     batch_windows: int = 256,
-    n_eval_windows: int = 200,
+    n_eval_windows: int = 2000,
 ):
     import yaml
     with open(config_path) as f:

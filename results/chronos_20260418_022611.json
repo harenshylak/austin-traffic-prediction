@@ -1,0 +1,26 @@
+{
+  "run_id": "20260418_022611",
+  "model": "chronos_t5_base",
+  "model_id": "amazon/chronos-t5-base",
+  "zero_shot": true,
+  "config": "configs/default.yaml",
+  "n_sensors": 10,
+  "context_steps": 120,
+  "test_metrics": {
+    "15min": {
+      "mae": 3.4457,
+      "rmse": 8.6587,
+      "mape": 8.2613
+    },
+    "30min": {
+      "mae": 3.6487,
+      "rmse": 9.0312,
+      "mape": 8.7091
+    },
+    "60min": {
+      "mae": 4.101,
+      "rmse": 9.9371,
+      "mape": 9.6292
+    }
+  }
+}
