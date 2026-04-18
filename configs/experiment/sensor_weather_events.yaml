@@ -8,7 +8,7 @@ model:
   name: lstm_context
 
 data:
-  K: 15   # all context cols: weather(6) + calendar(7) + events(2)
+  K: 17   # all context cols: weather(6) + calendar(7) + events(4)
 
 training:
   batch_size: 64

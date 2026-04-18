@@ -195,32 +195,71 @@ def make_calendar_features(full_index: pd.DatetimeIndex) -> np.ndarray:
 
 def load_event_features(raw_dir: str, full_index: pd.DatetimeIndex) -> np.ndarray:
     """
-    Returns (T, 2) float32:
-      event_flag (0/1), event_impact (0-3)
+    Returns (T, 4) float32:
+      event_active       : 1 if any permitted event is active at this 5-min step
+      n_concurrent       : number of events active simultaneously (normalised 0-1)
+      has_road_closure   : 1 if any active event has a full road closure
+      road_closure_count : total road segments closed (normalised 0-1)
+
+    Handles two CSV formats:
+      - New format (ACE API): start_dt, end_dt, has_road_closure, road_closure_count
+      - Legacy format (manual): date, impact  (single-day events)
     """
     print("Step 4: Loading event features...")
-    df = pd.read_csv(os.path.join(raw_dir, "events.csv"), parse_dates=["date"])
+    df = pd.read_csv(os.path.join(raw_dir, "events.csv"))
 
-    # Per-date: max impact, flag
-    by_date = (
-        df.groupby("date")
-        .agg(event_flag=("impact", "count"), event_impact=("impact", "max"))
-        .reset_index()
-    )
-    by_date["event_flag"] = 1.0
-    by_date = by_date.set_index("date")
+    T = len(full_index)
+    event_active      = np.zeros(T, dtype=np.float32)
+    n_concurrent      = np.zeros(T, dtype=np.float32)
+    has_road_closure  = np.zeros(T, dtype=np.float32)
+    road_closure_cnt  = np.zeros(T, dtype=np.float32)
 
-    dates = full_index.normalize()  # midnight for each 5-min timestamp
-    flag   = dates.map(lambda d: by_date.loc[d, "event_flag"]   if d in by_date.index else 0.0)
-    impact = dates.map(lambda d: by_date.loc[d, "event_impact"] if d in by_date.index else 0.0)
+    if "start_dt" in df.columns:
+        # --- New ACE API format: exact start/end datetimes ---
+        df["start_dt"] = pd.to_datetime(df["start_dt"], utc=False)
+        df["end_dt"]   = pd.to_datetime(df["end_dt"],   utc=False)
 
-    arr = np.stack([
-        np.array(flag,   dtype=np.float32),
-        np.array(impact, dtype=np.float32),
-    ], axis=1)
+        # Build a fast lookup: for each event mark which 5-min bins it covers
+        idx_series = pd.Series(range(T), index=full_index)
 
-    n_event_steps = int((arr[:, 0] > 0).sum())
+        for _, row in df.iterrows():
+            # Find indices in full_index that fall within [start_dt, end_dt]
+            mask = (full_index >= row["start_dt"]) & (full_index <= row["end_dt"])
+            if not mask.any():
+                continue
+            event_active[mask]     += 1.0
+            road_closure_cnt[mask] += float(row.get("road_closure_count", 0) or 0)
+            if row.get("has_road_closure", 0):
+                has_road_closure[mask] = 1.0
+
+        # n_concurrent = raw count; normalise both counts to 0-1 for scaling
+        max_concurrent = event_active.max()
+        max_closures   = road_closure_cnt.max()
+        n_concurrent     = (event_active / max(max_concurrent, 1)).astype(np.float32)
+        road_closure_cnt = (road_closure_cnt / max(max_closures, 1)).astype(np.float32)
+        event_active     = (event_active > 0).astype(np.float32)
+
+    else:
+        # --- Legacy manual format: one row per event-day ---
+        df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+        by_date = (
+            df.groupby("date")
+            .agg(event_flag=("impact", "count"), event_impact=("impact", "max"))
+            .reset_index()
+        )
+        by_date = by_date.set_index("date")
+        dates = full_index.normalize()
+        for i, d in enumerate(dates):
+            if d in by_date.index:
+                event_active[i]     = 1.0
+                road_closure_cnt[i] = float(by_date.loc[d, "event_impact"]) / 3.0
+
+    arr = np.stack([event_active, n_concurrent, has_road_closure, road_closure_cnt], axis=1)
+
+    n_event_steps = int(event_active.sum())
     print(f"  Event array: {arr.shape}  ({n_event_steps:,} timesteps with active event)")
+    if "start_dt" in df.columns:
+        print(f"  Events with road closures: {int(has_road_closure.max() > 0)}")
     return arr
 
 

@@ -317,7 +317,7 @@ def build_from_config(cfg: dict, N: int) -> HMSTGN:
         N=N,
         T=dat["T"],
         F_in=dat["F"],
-        K=15,                          # weather(6) + calendar(7) + events(2)
+        K=dat.get("K", 17),            # weather(6) + calendar(7) + events(4)
         H=dat["H"],
         d_model=m["d_model"],
         patch_size=m["patch_transformer"]["patch_size"],

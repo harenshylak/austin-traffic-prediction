@@ -31,8 +31,9 @@ model:
 data:
   T: 12                    # Input timesteps (60 min at 5-min resolution)
   H: 12                    # Max prediction horizon (60 min); eval at 3, 6, 12
-  N: 50                    # Number of sensor nodes
+  N: 10                    # Number of sensor nodes (set at runtime from sensor_order.json)
   F: 3                     # Input features: speed, volume, occupancy
+  K: 17                    # Context features: weather(6) + calendar(7) + events(4)
   eval_horizons: [3, 6, 12]  # 15 min, 30 min, 60 min
 
   splits:
