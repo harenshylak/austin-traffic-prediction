@@ -13,7 +13,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import torch
-import torch.nn as nn
 from streamlit_folium import st_folium
 
 # ── page config ────────────────────────────────────────────────────────────────
@@ -25,59 +24,58 @@ st.set_page_config(
 )
 
 # ── constants ──────────────────────────────────────────────────────────────────
-GRAPH_DIR   = "data/graph"
-PROC_DIR    = "data/processed"
-CKPT_DIR    = "checkpoints"
-HORIZONS    = [3, 6, 12]          # steps → 15, 30, 60 min
-STEP_MIN    = 5
+GRAPH_DIR  = "data/graph"
+PROC_DIR   = "data/processed"
+CKPT_DIR   = "checkpoints"
+STEP_MIN   = 5
+
 SENSOR_NAMES = {
     1:  "Lamar / Manchaca",
     3:  "Lamar / Shoal Creek",
     8:  "Loop 360 / Walsh Tarlton",
     10: "Lamar / Broken Spoke",
     11: "Burnet / Rutland",
-    15: "Cesar Chavez / BR Reynolds",
+    15: "Cesar Chavez / Reynolds",
     20: "Cesar Chavez / IH-35",
     22: "Lamar / Collier",
     23: "Burnet / Palm Way",
     24: "Loop 360 / Lakewood",
 }
 
-MODEL_LABELS = {
-    "LSTM — Sensor Only":        ("lstm_only",     False),
-    "LSTM + Weather":            ("lstm_context",   True),   # K=6
-    "LSTM + Weather + Events":   ("lstm_context",   True),   # K=17
-}
+# K=15: weight shape in checkpoint is [128, 180] = [128, 12*15]
+# context columns: weather(6) + calendar(7) + event_active + n_concurrent
+K_CONTEXT = 15
 
 RESULT_FILES = {
-    "ARIMA(2,1,2)":                 "results/arima_20260411_193632.json",
-    "Chronos-T5-Base (zero-shot)":  "results/chronos_20260418_022611.json",
-    "LSTM — Sensor Only":           "results/lstm_only_20260411_174822.json",
-    "LSTM + Weather":               "results/lstm_context_20260411_170936.json",
-    "LSTM + Weather + Events":      "results/lstm_context_20260411_173212.json",
+    "ARIMA(2,1,2)":               "results/arima_20260411_193632.json",
+    "Chronos-T5-Base (zero-shot)":"results/chronos_20260418_022611.json",
+    "LSTM — Sensor Only":         "results/lstm_only_20260411_174822.json",
+    "LSTM + Weather":             "results/lstm_context_20260411_170936.json",
+    "LSTM + Weather + Events":    "results/lstm_context_20260411_173212.json",
 }
 
-SPEED_COLORS = ["#16A34A", "#65A30D", "#CA8A04", "#EA580C", "#DC2626"]
+LIVE_MODELS = ["LSTM — Sensor Only", "LSTM + Weather + Events"]
 
-# ── caching data loads ─────────────────────────────────────────────────────────
+MODEL_COLORS = {
+    "LSTM — Sensor Only":       "#2563EB",
+    "LSTM + Weather + Events":  "#16A34A",
+}
+
+# ── data loading ───────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_data():
-    traffic  = np.load(os.path.join(GRAPH_DIR, "traffic.npy"),   mmap_mode="r")
-    context  = np.load(os.path.join(GRAPH_DIR, "context.npy"),   mmap_mode="r")
+    traffic    = np.load(os.path.join(GRAPH_DIR, "traffic.npy"),    mmap_mode="r")
+    context    = np.load(os.path.join(GRAPH_DIR, "context.npy"),    mmap_mode="r")
     timestamps = np.load(os.path.join(GRAPH_DIR, "timestamps.npy"), allow_pickle=True)
     with open(os.path.join(GRAPH_DIR, "split_indices.json")) as f:
         splits = json.load(f)
     with open(os.path.join(GRAPH_DIR, "scaler_traffic.pkl"), "rb") as f:
         scaler_t = pickle.load(f)
-    with open(os.path.join(GRAPH_DIR, "scaler_context.pkl"), "rb") as f:
-        scaler_c = pickle.load(f)
     with open(os.path.join(GRAPH_DIR, "sensor_order.json")) as f:
         sensor_order = json.load(f)
-
     sensor_locs = pd.read_csv(os.path.join(PROC_DIR, "sensor_locations.csv"))
-
     ts = pd.DatetimeIndex(pd.to_datetime(timestamps))
-    return traffic, context, ts, splits, scaler_t, scaler_c, sensor_order, sensor_locs
+    return traffic, context, ts, splits, scaler_t, sensor_order, sensor_locs
 
 
 @st.cache_resource
@@ -85,64 +83,37 @@ def load_models():
     from src.models.lstm_baseline import LSTMBaseline
     from src.models.lstm_context  import LSTMWithContext
 
-    models = {}
-    # LSTM sensor only
+    # ── LSTM sensor only ──────────────────────────────────────────────────────
     ck = torch.load(os.path.join(CKPT_DIR, "lstm_only_best.pt"),
                     map_location="cpu", weights_only=False)
-    cfg = ck["cfg"]
-    m = LSTMBaseline(
-        n_sensors=cfg["data"]["N"],
-        n_features=cfg["data"]["F"],
-        H=cfg["data"]["H"],
-        hidden_dim=cfg["model"]["d_model"],
-        n_layers=cfg["model"]["patch_transformer"]["n_layers"],
-        dropout=cfg["model"]["dropout"],
+    m_base = LSTMBaseline(
+        F=3, hidden_dim=64, n_layers=2, H=12, dropout=0.1,
     )
-    m.load_state_dict(ck["model_state"])
-    m.eval()
-    models["LSTM — Sensor Only"] = ("baseline", m, None)
+    m_base.load_state_dict(ck["model_state"])
+    m_base.eval()
 
-    # LSTM + Weather (K=6)
-    ck6 = torch.load(os.path.join(CKPT_DIR, "lstm_context_best.pt"),
-                     map_location="cpu", weights_only=False)
-    cfg6 = ck6["cfg"]
-    m6 = LSTMWithContext(
-        n_sensors=cfg6["data"]["N"],
-        n_features=cfg6["data"]["F"],
-        K=6,
-        H=cfg6["data"]["H"],
-        hidden_dim=cfg6["model"]["d_model"],
-        n_layers=cfg6["model"]["patch_transformer"]["n_layers"],
-        dropout=cfg6["model"]["dropout"],
+    # ── LSTM + context (K=15, as saved in checkpoint) ─────────────────────────
+    ck_ctx = torch.load(os.path.join(CKPT_DIR, "lstm_context_best.pt"),
+                        map_location="cpu", weights_only=False)
+    m_ctx = LSTMWithContext(
+        F=3, K=K_CONTEXT, T=12, hidden_dim=64, n_layers=2, H=12, dropout=0.1,
     )
-    m6.load_state_dict(ck6["model_state"])
-    m6.eval()
-    models["LSTM + Weather"] = ("context", m6, 6)
+    m_ctx.load_state_dict(ck_ctx["model_state"])
+    m_ctx.eval()
 
-    # LSTM + Weather + Events (K=17)
-    m17 = LSTMWithContext(
-        n_sensors=cfg6["data"]["N"],
-        n_features=cfg6["data"]["F"],
-        K=17,
-        H=cfg6["data"]["H"],
-        hidden_dim=cfg6["model"]["d_model"],
-        n_layers=cfg6["model"]["patch_transformer"]["n_layers"],
-        dropout=cfg6["model"]["dropout"],
-    )
-    m17.load_state_dict(ck6["model_state"])
-    m17.eval()
-    models["LSTM + Weather + Events"] = ("context", m17, 17)
-
-    return models
+    return {
+        "LSTM — Sensor Only":       ("baseline", m_base),
+        "LSTM + Weather + Events":  ("context",  m_ctx),
+    }
 
 
-def denorm_speed(arr, scaler):
+def denorm(arr, scaler):
     return arr * scaler.scale_[0] + scaler.mean_[0]
 
 
 @st.cache_data
-def run_inference(model_name, window_idx):
-    traffic, context, ts, splits, scaler_t, scaler_c, sensor_order, _ = load_data()
+def run_inference(model_name: str, window_idx: int):
+    traffic, context, ts, splits, scaler_t, sensor_order, _ = load_data()
     models = load_models()
 
     T, H = 12, 12
@@ -151,33 +122,33 @@ def run_inference(model_name, window_idx):
     t1 = t0 + T
     t2 = t1 + H
 
-    traffic_win = torch.from_numpy(np.array(traffic[t0:t1], dtype=np.float32)).unsqueeze(0)  # (1,T,N,F)
-    target_win  = np.array(traffic[t1:t2, :, 0])  # (H, N)
+    traffic_win = torch.from_numpy(
+        np.array(traffic[t0:t1], dtype=np.float32)
+    ).unsqueeze(0)   # (1,T,N,F)
 
-    kind, model, K = models[model_name]
+    kind, model = models[model_name]
 
     with torch.no_grad():
         if kind == "baseline":
             pred = model(traffic_win, target=None, teacher_forcing_ratio=0.0)
         else:
             ctx_win = torch.from_numpy(
-                np.array(context[t0:t1, :K], dtype=np.float32)
-            ).unsqueeze(0)  # (1,T,K)
+                np.array(context[t0:t1, :K_CONTEXT], dtype=np.float32)
+            ).unsqueeze(0)   # (1,T,K)
             pred = model(traffic_win, ctx_win, target=None, teacher_forcing_ratio=0.0)
 
-    pred_np = pred.squeeze(0).numpy()          # (H, N, 1)
-    pred_speed = denorm_speed(pred_np[:, :, 0], scaler_t)   # (H, N)
-    actual_speed = denorm_speed(target_win, scaler_t)        # (H, N)
-    input_speed  = denorm_speed(np.array(traffic[t0:t1, :, 0]), scaler_t)  # (T, N)
+    pred_np    = pred.squeeze(0).numpy()                        # (H,N,1)
+    pred_speed = denorm(pred_np[:, :, 0], scaler_t)             # (H,N)
+    actual_speed = denorm(np.array(traffic[t1:t2, :, 0]), scaler_t)  # (H,N)
+    input_speed  = denorm(np.array(traffic[t0:t1, :, 0]), scaler_t)  # (T,N)
 
     return pred_speed, actual_speed, input_speed, ts[t0:t2]
 
 
-def speed_to_color(speed, vmin=20, vmax=65):
-    ratio = max(0.0, min(1.0, (speed - vmin) / (vmax - vmin)))
-    r = int(220 * (1 - ratio))
-    g = int(180 * ratio)
-    return f"#{r:02x}{g:02x}30"
+def speed_to_hex(speed, vmin=20, vmax=65):
+    r = max(0.0, min(1.0, (vmax - speed) / (vmax - vmin)))
+    g = max(0.0, min(1.0, (speed - vmin) / (vmax - vmin)))
+    return f"#{int(220*r):02x}{int(180*g):02x}30"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -188,38 +159,24 @@ with st.sidebar:
     st.markdown("**Prediction Dashboard**")
     st.divider()
 
-    page = st.radio(
-        "View",
-        ["Forecast Explorer", "Model Comparison", "Data Analytics"],
-        label_visibility="collapsed",
-    )
+    page = st.radio("View", ["Forecast Explorer", "Model Comparison", "Data Analytics"],
+                    label_visibility="collapsed")
     st.divider()
+
+    traffic, context, ts, splits, scaler_t, sensor_order, sensor_locs = load_data()
+    test_s, test_e = splits["test"]
+    n_windows = (test_e - test_s) - 12 - 12 + 1
+
+    if page in ("Forecast Explorer", "Model Comparison"):
+        st.subheader("Test Window")
+        window_idx = st.slider("", 0, n_windows - 1, 0,
+                               help="Each step = 5 min in Jul–Sep 2021 test set")
+        window_time = ts[test_s + window_idx]
+        st.caption(f"**{window_time.strftime('%a, %b %d %Y  %H:%M')}**")
 
     if page == "Forecast Explorer":
         st.subheader("Settings")
-        model_name = st.selectbox(
-            "Model",
-            list(MODEL_LABELS.keys()),
-        )
-        _, _, splits_raw, _, _, _, _, _ = (
-            load_data()[0], load_data()[1], load_data()[3],
-            load_data()[4], load_data()[5], load_data()[6], load_data()[7],
-            None,
-        )
-
-        traffic, context, ts, splits, scaler_t, scaler_c, sensor_order, sensor_locs = load_data()
-        test_s, test_e = splits["test"]
-        n_windows = (test_e - test_s) - 12 - 12 + 1
-
-        window_idx = st.slider(
-            "Test window",
-            0, n_windows - 1, 0,
-            help="Each step = 5 minutes in the Jul–Sep 2021 test set",
-        )
-
-        window_time = ts[test_s + window_idx]
-        st.caption(f"Window start: **{window_time.strftime('%b %d, %Y  %H:%M')}**")
-
+        model_name = st.selectbox("Model", LIVE_MODELS)
         horizon_step = st.select_slider(
             "Forecast horizon",
             options=[3, 6, 12],
@@ -227,155 +184,115 @@ with st.sidebar:
             format_func=lambda x: f"{x*5} min",
         )
 
-    elif page == "Model Comparison":
-        traffic, context, ts, splits, scaler_t, scaler_c, sensor_order, sensor_locs = load_data()
-        test_s, test_e = splits["test"]
-        n_windows = (test_e - test_s) - 12 - 12 + 1
-        window_idx = st.slider("Test window", 0, n_windows - 1, 500)
-        window_time = ts[test_s + window_idx]
-        st.caption(f"Window start: **{window_time.strftime('%b %d, %Y  %H:%M')}**")
-    else:
-        traffic, context, ts, splits, scaler_t, scaler_c, sensor_order, sensor_locs = load_data()
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 1 — FORECAST EXPLORER
 # ══════════════════════════════════════════════════════════════════════════════
 if page == "Forecast Explorer":
     st.title("Forecast Explorer")
-    st.caption(f"Model: **{model_name}** | Window: {window_time.strftime('%A, %b %d %Y %H:%M')} | Horizon: {horizon_step*5} min")
 
     with st.spinner("Running inference..."):
         pred_speed, actual_speed, input_speed, win_ts = run_inference(model_name, window_idx)
 
-    # ── top row: map + horizon metrics ────────────────────────────────────────
+    h_idx = horizon_step - 1
+    T = 12
+
+    # ── top row: map + metrics ────────────────────────────────────────────────
     col_map, col_metrics = st.columns([1.4, 1])
 
     with col_map:
-        st.subheader("Sensor Map")
-        m = folium.Map(
-            location=[30.295, -97.76],
-            zoom_start=12,
-            tiles="CartoDB positron",
-        )
+        st.subheader(f"Sensor Map  —  Predicted speed @ {horizon_step*5} min")
+        m = folium.Map(location=[30.295, -97.76], zoom_start=12,
+                       tiles="CartoDB positron")
 
-        h_idx = horizon_step - 1
         for i, sid in enumerate(sensor_order):
             row = sensor_locs[sensor_locs["int_id"] == sid]
             if row.empty:
                 continue
             lat, lon = float(row["lat"].iloc[0]), float(row["lon"].iloc[0])
-            pred_v   = float(pred_speed[h_idx, i])
-            actual_v = float(actual_speed[h_idx, i])
-            name     = SENSOR_NAMES.get(sid, f"Sensor {sid}")
-            color    = speed_to_color(pred_v)
+            pv = float(pred_speed[h_idx, i])
+            av = float(actual_speed[h_idx, i])
+            name = SENSOR_NAMES.get(sid, f"Sensor {sid}")
 
             folium.CircleMarker(
-                location=[lat, lon],
-                radius=14,
-                color="#1e293b",
-                weight=1.5,
-                fill=True,
-                fill_color=color,
-                fill_opacity=0.88,
+                location=[lat, lon], radius=14,
+                color="#1e293b", weight=1.5,
+                fill=True, fill_color=speed_to_hex(pv), fill_opacity=0.9,
                 popup=folium.Popup(
                     f"<b>{name}</b><br>"
-                    f"Predicted: <b>{pred_v:.1f} mph</b><br>"
-                    f"Actual: {actual_v:.1f} mph<br>"
-                    f"Error: {abs(pred_v - actual_v):.1f} mph",
+                    f"Predicted: <b>{pv:.1f} mph</b><br>"
+                    f"Actual: {av:.1f} mph<br>"
+                    f"Error: {abs(pv-av):.1f} mph",
                     max_width=200,
                 ),
-                tooltip=f"{name}: {pred_v:.1f} mph",
+                tooltip=f"{name}: {pv:.1f} mph predicted",
             ).add_to(m)
 
-        st_folium(m, width=520, height=370, returned_objects=[])
+        st_folium(m, width=520, height=360, returned_objects=[])
 
     with col_metrics:
-        st.subheader(f"Network Summary @ {horizon_step*5} min")
-        h_idx = horizon_step - 1
-        mae   = float(np.mean(np.abs(pred_speed[h_idx] - actual_speed[h_idx])))
-        mape  = float(np.mean(np.abs(pred_speed[h_idx] - actual_speed[h_idx]) /
-                              np.clip(actual_speed[h_idx], 1, None)) * 100)
-        avg_pred   = float(pred_speed[h_idx].mean())
-        avg_actual = float(actual_speed[h_idx].mean())
+        st.subheader(f"Network summary  @  {horizon_step*5} min")
+        mae  = float(np.mean(np.abs(pred_speed[h_idx] - actual_speed[h_idx])))
+        mape = float(np.mean(
+            np.abs(pred_speed[h_idx] - actual_speed[h_idx]) /
+            np.clip(actual_speed[h_idx], 1, None)) * 100)
 
         c1, c2 = st.columns(2)
-        c1.metric("MAE",          f"{mae:.2f} mph")
-        c2.metric("MAPE",         f"{mape:.1f}%")
-        c1.metric("Avg Predicted", f"{avg_pred:.1f} mph")
-        c2.metric("Avg Actual",    f"{avg_actual:.1f} mph")
+        c1.metric("MAE",  f"{mae:.2f} mph")
+        c2.metric("MAPE", f"{mape:.1f}%")
+        c1.metric("Avg Predicted", f"{pred_speed[h_idx].mean():.1f} mph")
+        c2.metric("Avg Actual",    f"{actual_speed[h_idx].mean():.1f} mph")
 
         st.divider()
-        st.subheader("Per-sensor @ horizon")
         rows = []
         for i, sid in enumerate(sensor_order):
             p = float(pred_speed[h_idx, i])
             a = float(actual_speed[h_idx, i])
             rows.append({
                 "Sensor": SENSOR_NAMES.get(sid, f"Sensor {sid}"),
-                "Predicted": round(p, 1),
-                "Actual": round(a, 1),
-                "Error": round(abs(p - a), 1),
+                "Predicted (mph)": round(p, 1),
+                "Actual (mph)":    round(a, 1),
+                "Error (mph)":     round(abs(p - a), 1),
             })
-        df_tbl = pd.DataFrame(rows).sort_values("Error", ascending=False)
-        st.dataframe(df_tbl, use_container_width=True, hide_index=True,
-                     column_config={
-                         "Predicted": st.column_config.NumberColumn(format="%.1f mph"),
-                         "Actual":    st.column_config.NumberColumn(format="%.1f mph"),
-                         "Error":     st.column_config.NumberColumn(format="%.1f mph"),
-                     })
+        st.dataframe(
+            pd.DataFrame(rows).sort_values("Error (mph)", ascending=False),
+            use_container_width=True, hide_index=True,
+        )
 
-    # ── bottom: per-sensor forecast chart ────────────────────────────────────
-    st.subheader("Forecast vs Actual — All Sensors")
-    n_sensors = len(sensor_order)
-    n_cols = 5
-    n_rows = (n_sensors + n_cols - 1) // n_cols
-    sensor_cols = st.columns(n_cols)
+    # ── per-sensor forecast charts ────────────────────────────────────────────
+    st.divider()
+    st.subheader("Predicted vs Actual — per sensor")
 
-    T = 12
-    future_steps = list(range(1, 13))
-    future_min   = [s * STEP_MIN for s in future_steps]
+    hist_x   = [-STEP_MIN * (T - j) for j in range(T)]
+    future_x = [s * STEP_MIN for s in range(1, T + 1)]
 
+    cols = st.columns(5)
     for i, sid in enumerate(sensor_order):
-        col = sensor_cols[i % n_cols]
         name = SENSOR_NAMES.get(sid, f"Sensor {sid}").split("/")[-1].strip()
-
         fig = go.Figure()
-        # input history
-        hist_x = [-STEP_MIN * (T - j) for j in range(T)]
-        fig.add_trace(go.Scatter(
-            x=hist_x, y=input_speed[:, i],
-            mode="lines", name="History",
-            line=dict(color="#94A3B8", width=1.5),
-        ))
-        # actual future
-        fig.add_trace(go.Scatter(
-            x=future_min, y=actual_speed[:, i],
-            mode="lines+markers", name="Actual",
-            line=dict(color="#2563EB", width=2),
-            marker=dict(size=4),
-        ))
-        # predicted future
-        fig.add_trace(go.Scatter(
-            x=future_min, y=pred_speed[:, i],
-            mode="lines+markers", name="Predicted",
-            line=dict(color="#EA580C", width=2, dash="dash"),
-            marker=dict(size=4),
-        ))
-        # vertical divider
+        fig.add_trace(go.Scatter(x=hist_x, y=input_speed[:, i],
+                                 mode="lines", name="History",
+                                 line=dict(color="#94A3B8", width=1.5)))
+        fig.add_trace(go.Scatter(x=future_x, y=actual_speed[:, i],
+                                 mode="lines+markers", name="Actual",
+                                 line=dict(color="#2563EB", width=2),
+                                 marker=dict(size=4)))
+        fig.add_trace(go.Scatter(x=future_x, y=pred_speed[:, i],
+                                 mode="lines+markers", name="Predicted",
+                                 line=dict(color="#EA580C", width=2, dash="dash"),
+                                 marker=dict(size=4)))
         fig.add_vline(x=0, line_dash="dot", line_color="#64748B", line_width=1)
-
         fig.update_layout(
             title=dict(text=name, font_size=11),
-            margin=dict(l=10, r=10, t=30, b=20),
-            height=200,
-            showlegend=False,
-            xaxis=dict(title="min", tickfont_size=9, zeroline=False),
-            yaxis=dict(title="mph", tickfont_size=9),
-            plot_bgcolor="white",
-            paper_bgcolor="white",
+            margin=dict(l=10, r=10, t=28, b=20), height=200,
+            showlegend=(i == 0),
+            xaxis=dict(title="min", zeroline=False, tickfont_size=8),
+            yaxis=dict(title="mph", tickfont_size=8),
+            plot_bgcolor="white", paper_bgcolor="white",
+            legend=dict(orientation="h", y=1.35, font_size=9),
         )
-        col.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        cols[i % 5].plotly_chart(fig, use_container_width=True,
+                                 config={"displayModeBar": False})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -384,8 +301,8 @@ if page == "Forecast Explorer":
 elif page == "Model Comparison":
     st.title("Model Comparison")
 
-    # ── aggregate metrics table from saved results ─────────────────────────────
-    st.subheader("Test Set Results (full evaluation)")
+    # ── aggregate metrics table ───────────────────────────────────────────────
+    st.subheader("Test Set Results — full evaluation")
     rows = []
     for label, path in RESULT_FILES.items():
         if not os.path.exists(path):
@@ -395,94 +312,179 @@ elif page == "Model Comparison":
         m = res.get("test_metrics", {})
         rows.append({
             "Model":       label,
-            "MAE @15min":  m.get("15min", {}).get("mae",  "—"),
-            "MAE @30min":  m.get("30min", {}).get("mae",  "—"),
-            "MAE @60min":  m.get("60min", {}).get("mae",  "—"),
-            "RMSE @15min": m.get("15min", {}).get("rmse", "—"),
-            "MAPE @15min": m.get("15min", {}).get("mape", "—"),
+            "MAE @15min":  m.get("15min", {}).get("mae",  None),
+            "MAE @30min":  m.get("30min", {}).get("mae",  None),
+            "MAE @60min":  m.get("60min", {}).get("mae",  None),
+            "RMSE @15min": m.get("15min", {}).get("rmse", None),
+            "MAPE @15min": m.get("15min", {}).get("mape", None),
         })
 
     df_res = pd.DataFrame(rows)
     best_mae = df_res["MAE @15min"].min()
 
-    def highlight_best(val):
-        if val == best_mae:
-            return "background-color: #DCFCE7; font-weight: bold"
-        return ""
-
     st.dataframe(
-        df_res.style.applymap(highlight_best, subset=["MAE @15min"]),
-        use_container_width=True,
-        hide_index=True,
+        df_res.style.map(
+            lambda v: "background-color:#DCFCE7; font-weight:bold" if v == best_mae else "",
+            subset=["MAE @15min"],
+        ),
+        use_container_width=True, hide_index=True,
     )
 
     # ── MAE by horizon bar chart ───────────────────────────────────────────────
     st.subheader("MAE by Forecast Horizon")
+    BAR_COLORS = ["#94A3B8", "#7C3AED", "#2563EB", "#0EA5E9", "#16A34A"]
     fig = go.Figure()
-    colors = ["#94A3B8", "#7C3AED", "#2563EB", "#0EA5E9", "#16A34A"]
     for idx, row in enumerate(rows):
-        mae_vals = [row["MAE @15min"], row["MAE @30min"], row["MAE @60min"]]
         fig.add_trace(go.Bar(
             name=row["Model"],
             x=["15 min", "30 min", "60 min"],
-            y=mae_vals,
-            marker_color=colors[idx % len(colors)],
+            y=[row["MAE @15min"], row["MAE @30min"], row["MAE @60min"]],
+            marker_color=BAR_COLORS[idx % len(BAR_COLORS)],
         ))
     fig.update_layout(
-        barmode="group",
-        yaxis_title="MAE (mph)",
-        height=380,
-        plot_bgcolor="white",
-        paper_bgcolor="white",
+        barmode="group", yaxis_title="MAE (mph)", height=360,
+        plot_bgcolor="white", paper_bgcolor="white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # ── live side-by-side forecast for selected window ─────────────────────────
-    st.subheader(f"Live Forecasts on Window {window_idx}  ({window_time.strftime('%b %d %H:%M')})")
-    st.caption("Sensor-level predictions from the three LSTM variants on the same test window.")
+    # ── live actual vs predicted — side by side ───────────────────────────────
+    st.divider()
+    st.subheader(f"Actual vs Predicted — {window_time.strftime('%a %b %d %Y  %H:%M')}")
+    st.caption("Network-average speed (mean of all 10 sensors) — live inference on selected window.")
 
-    lstm_models = ["LSTM — Sensor Only", "LSTM + Weather", "LSTM + Weather + Events"]
-    result_cols = st.columns(3)
+    T = 12
+    hist_x   = [-STEP_MIN * (T - j) for j in range(T)]
+    future_x = [s * STEP_MIN for s in range(1, T + 1)]
 
-    for col, mname in zip(result_cols, lstm_models):
-        with col:
-            with st.spinner(f"Running {mname}..."):
-                pred_s, actual_s, input_s, _ = run_inference(mname, window_idx)
+    # Run both live models
+    results_live = {}
+    for mname in LIVE_MODELS:
+        with st.spinner(f"Running {mname}..."):
+            ps, ac, ins, _ = run_inference(mname, window_idx)
+            results_live[mname] = (ps, ac, ins)
 
-            mae_val = float(np.mean(np.abs(pred_s - actual_s)))
-            col.metric(mname, f"MAE {mae_val:.2f} mph")
+    # ── network-average chart: all models + actual on one plot ────────────────
+    fig = go.Figure()
 
-            # network-average forecast chart
-            avg_pred   = pred_s.mean(axis=1)
-            avg_actual = actual_s.mean(axis=1)
-            avg_input  = input_s.mean(axis=1)
-            T = 12
-            hist_x   = [-STEP_MIN * (T - j) for j in range(T)]
-            future_x = [s * STEP_MIN for s in range(1, 13)]
+    # history (same for all models — use first)
+    ins0 = list(results_live.values())[0][2]
+    fig.add_trace(go.Scatter(
+        x=hist_x, y=ins0.mean(axis=1),
+        mode="lines", name="History",
+        line=dict(color="#94A3B8", width=2),
+    ))
 
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=hist_x, y=avg_input,
-                                     mode="lines", name="History",
-                                     line=dict(color="#94A3B8", width=1.5)))
-            fig.add_trace(go.Scatter(x=future_x, y=avg_actual,
-                                     mode="lines+markers", name="Actual",
-                                     line=dict(color="#2563EB", width=2),
+    # actual (same for all models)
+    ac0 = list(results_live.values())[0][1]
+    fig.add_trace(go.Scatter(
+        x=future_x, y=ac0.mean(axis=1),
+        mode="lines+markers", name="Actual",
+        line=dict(color="#1e293b", width=2.5),
+        marker=dict(size=6, symbol="circle"),
+    ))
+
+    # predicted per model
+    for mname, (ps, ac, ins) in results_live.items():
+        mae_val = float(np.mean(np.abs(ps - ac)))
+        fig.add_trace(go.Scatter(
+            x=future_x, y=ps.mean(axis=1),
+            mode="lines+markers",
+            name=f"{mname} (MAE {mae_val:.2f})",
+            line=dict(color=MODEL_COLORS[mname], width=2, dash="dash"),
+            marker=dict(size=5),
+        ))
+
+    fig.add_vline(x=0, line_dash="dot", line_color="#64748B", line_width=1.2,
+                  annotation_text="now", annotation_position="top right")
+    fig.update_layout(
+        height=360, xaxis_title="Minutes from window start",
+        yaxis_title="Avg speed (mph)",
+        plot_bgcolor="white", paper_bgcolor="white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        xaxis=dict(zeroline=False),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── per-sensor actual vs predicted at each horizon ─────────────────────────
+    st.subheader("Per-Sensor Actual vs Predicted @ Each Horizon")
+
+    horizon_tab_labels = ["15 min", "30 min", "60 min"]
+    horizon_steps      = [3, 6, 12]
+    tabs = st.tabs(horizon_tab_labels)
+
+    for tab, h_step in zip(tabs, horizon_steps):
+        with tab:
+            h_idx = h_step - 1
+            sensor_cols = st.columns(5)
+            for i, sid in enumerate(sensor_order):
+                sname = SENSOR_NAMES.get(sid, f"Sensor {sid}").split("/")[-1].strip()
+                actual_val = float(list(results_live.values())[0][1][h_idx, i])
+
+                fig = go.Figure()
+                # Actual value — horizontal reference line
+                fig.add_hline(y=actual_val, line_color="#1e293b", line_width=2,
+                              annotation_text=f"Actual {actual_val:.1f}",
+                              annotation_position="bottom right",
+                              annotation_font_size=9)
+
+                for mname, (ps, ac, ins) in results_live.items():
+                    fig.add_trace(go.Bar(
+                        name=mname,
+                        x=[mname.split("—")[-1].strip().split("+")[0].strip()],
+                        y=[float(ps[h_idx, i])],
+                        marker_color=MODEL_COLORS[mname],
+                        text=[f"{float(ps[h_idx,i]):.1f}"],
+                        textposition="outside",
+                    ))
+
+                fig.update_layout(
+                    title=dict(text=sname, font_size=10),
+                    margin=dict(l=5, r=5, t=28, b=5), height=200,
+                    showlegend=False,
+                    yaxis=dict(title="mph", range=[
+                        min(actual_val, min(float(ps[h_idx, i]) for ps, _, _ in results_live.values())) - 5,
+                        max(actual_val, max(float(ps[h_idx, i]) for ps, _, _ in results_live.values())) + 8,
+                    ], tickfont_size=8),
+                    xaxis=dict(tickfont_size=8),
+                    plot_bgcolor="white", paper_bgcolor="white",
+                    bargap=0.3,
+                )
+                sensor_cols[i % 5].plotly_chart(fig, use_container_width=True,
+                                                config={"displayModeBar": False})
+
+    # ── full horizon line: per sensor ──────────────────────────────────────────
+    st.subheader("Full Forecast Trajectory — Per Sensor")
+    sensor_cols2 = st.columns(5)
+    for i, sid in enumerate(sensor_order):
+        sname = SENSOR_NAMES.get(sid, f"Sensor {sid}").split("/")[-1].strip()
+        ins0 = list(results_live.values())[0][2]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=hist_x, y=ins0[:, i],
+                                 mode="lines", name="History",
+                                 line=dict(color="#94A3B8", width=1.5)))
+        fig.add_trace(go.Scatter(x=future_x, y=list(results_live.values())[0][1][:, i],
+                                 mode="lines+markers", name="Actual",
+                                 line=dict(color="#1e293b", width=2),
+                                 marker=dict(size=4)))
+        for mname, (ps, _, _) in results_live.items():
+            fig.add_trace(go.Scatter(x=future_x, y=ps[:, i],
+                                     mode="lines+markers", name=mname.split("—")[-1].strip(),
+                                     line=dict(color=MODEL_COLORS[mname], width=2, dash="dash"),
                                      marker=dict(size=4)))
-            fig.add_trace(go.Scatter(x=future_x, y=avg_pred,
-                                     mode="lines+markers", name="Predicted",
-                                     line=dict(color="#EA580C", width=2, dash="dash"),
-                                     marker=dict(size=4)))
-            fig.add_vline(x=0, line_dash="dot", line_color="#64748B", line_width=1)
-            fig.update_layout(
-                height=220, margin=dict(l=10, r=10, t=10, b=30),
-                showlegend=(mname == lstm_models[0]),
-                xaxis=dict(title="min", zeroline=False),
-                yaxis=dict(title="mph"),
-                plot_bgcolor="white", paper_bgcolor="white",
-            )
-            st.plotly_chart(fig, use_container_width=True,
-                            config={"displayModeBar": False})
+        fig.add_vline(x=0, line_dash="dot", line_color="#64748B", line_width=1)
+        fig.update_layout(
+            title=dict(text=sname, font_size=10),
+            margin=dict(l=5, r=5, t=28, b=20), height=200,
+            showlegend=(i == 0),
+            xaxis=dict(title="min", zeroline=False, tickfont_size=8),
+            yaxis=dict(title="mph", tickfont_size=8),
+            plot_bgcolor="white", paper_bgcolor="white",
+            legend=dict(orientation="h", y=1.4, font_size=8),
+        )
+        sensor_cols2[i % 5].plotly_chart(fig, use_container_width=True,
+                                          config={"displayModeBar": False})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -494,57 +496,43 @@ elif page == "Data Analytics":
     tab1, tab2, tab3, tab4 = st.tabs([
         "Speed Overview", "STL Decomposition", "Daily / Weekly Patterns", "Anomaly Periods"
     ])
-
     FIG_DIR = "docs/figures"
 
     with tab1:
-        st.image(os.path.join(FIG_DIR, "speed_overview.png"),
-                 caption="Raw speed time series — all 10 sensors (grey) and network average (blue). "
-                         "Shaded bands show train / validation / test splits.",
-                 use_container_width=True)
+        st.image(os.path.join(FIG_DIR, "speed_overview.png"), use_container_width=True)
         st.markdown("""
-**Reading this chart:**
-- The blue line is the average of all 10 sensors — a stable ~43 mph with clear daily oscillation.
-- The grey traces show individual sensors; some run faster (highway) and some slower (city intersections).
-- Daily variability (bottom panel) is higher in mid-2021 as COVID restrictions lifted and traffic patterns became less predictable.
+**Reading this chart:** The blue line is the network average across all 10 sensors.
+Grey traces show individual sensors — some run faster (highway) and some slower (city intersections).
+The bottom panel shows daily speed variability — higher variance in mid-2021 as COVID restrictions lifted.
         """)
 
     with tab2:
-        st.image(os.path.join(FIG_DIR, "stl_decomposition.png"),
-                 caption="STL decomposition: observed, trend, weekly seasonal component, and residual.",
-                 use_container_width=True)
+        st.image(os.path.join(FIG_DIR, "stl_decomposition.png"), use_container_width=True)
         st.markdown("""
 **Components:**
-- **Trend**: slow decline from ~47 mph (Apr 2020, COVID low traffic) down to ~41 mph (mid-2021, traffic returning), then slight recovery.
-- **Seasonal (weekly, period=7 days)**: ±4 mph weekly cycle — weekends have faster free-flow speeds, Mon–Fri show rush-hour congestion.
-- **Residual**: noise around trend + seasonal. Large spikes are unusual traffic days (storms, holidays, events).
+- **Trend**: slow decline from ~47 mph (Apr 2020, COVID low traffic) to ~41 mph (mid-2021), then recovery.
+- **Seasonal (weekly, period=7)**: ±4 mph weekly cycle — weekends faster, Mon–Fri show rush-hour congestion.
+- **Residual**: anomalies around the expected pattern. Large spikes = unusual traffic days.
         """)
 
     with tab3:
-        st.image(os.path.join(FIG_DIR, "daily_weekly_pattern.png"),
-                 caption="Hourly speed profiles, day-of-week averages, and hour × day heatmap.",
-                 use_container_width=True)
+        st.image(os.path.join(FIG_DIR, "daily_weekly_pattern.png"), use_container_width=True)
         st.markdown("""
 **Key patterns:**
-- **Weekday rush hours**: speeds dip to ~35 mph at 8am and 5–6pm, matching Austin's well-documented commute congestion.
-- **Weekend**: smooth high-speed profile (~55 mph) all day with no morning dip.
-- **Heatmap** (right): darkest cells (lowest speed) are Mon–Fri 7–9am and 4–7pm. Saturday night shows slightly elevated speeds.
+- **Weekday rush hours**: speeds dip to ~35 mph at 8am and 5–6pm.
+- **Weekend**: smooth ~55 mph profile all day with no morning dip.
+- **Heatmap**: darkest cells (slowest) are Mon–Fri 7–9am and 4–7pm.
         """)
 
     with tab4:
-        st.image(os.path.join(FIG_DIR, "anomaly_periods.png"),
-                 caption="Anomaly days identified by STL residual > 95th percentile, color-coded by cause.",
-                 use_container_width=True)
+        st.image(os.path.join(FIG_DIR, "anomaly_periods.png"), use_container_width=True)
         st.markdown("""
-**Anomaly causes:**
 | Cause | Why it appears |
 |---|---|
 | COVID lockdown (Apr 2020) | Speeds *above* trend — roads empty, no rush-hour congestion |
-| Heavy rain | Reduces volume → free-flow speeds, or slows traffic depending on severity |
-| Winter Storm Uri (Feb 15, 2021) | Most extreme single day — ~15°F, icy roads, city effectively shut down |
-| Holidays | Break the weekly pattern — Thanksgiving, Christmas, MLK Day, Labor Day |
-| High wind (Nov 15, 2020) | 20+ mph gusts → drivers slow down |
-| Event + rain (Aug 2021) | ACE permitted events coinciding with heavy rainfall |
-
-**Note:** Most anomalies have *positive* residuals — meaning speeds were higher than expected. This is the volume effect: extreme weather or holidays keep drivers off the road, reducing congestion at monitored intersections.
+| Heavy rain | Volume drops → free-flow speeds, or drivers slow down in severe rain |
+| Winter Storm Uri (Feb 15, 2021) | Most extreme day — ~15°F, icy roads, city shut down |
+| Holidays | Break the weekly pattern (Thanksgiving, Christmas, MLK Day, Labor Day) |
+| High wind (Nov 15, 2020) | 20+ mph gusts slowed traffic |
+| Event + rain (Aug 2021) | ACE permitted events coinciding with heavy rain |
         """)
