@@ -235,37 +235,150 @@ print(f"  Saved {path}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Figure 4 — Anomaly periods (high STL residuals)
+# Figure 4 — Anomaly periods with cause annotations
 # ══════════════════════════════════════════════════════════════════════════════
-print("Plotting Fig 4: anomaly periods...")
+print("Plotting Fig 4: anomaly periods with annotations...")
+
+# Load context for decoding anomaly causes
+context_raw = np.load("data/graph/context.npy", mmap_mode="r")
+with open("data/graph/scaler_context.pkl", "rb") as f:
+    scaler_ctx = pickle.load(f)
+
+ctx_cols = [
+    "temp", "precip", "wind", "humidity", "visibility", "weather_code",
+    "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos", "is_weekend",
+    "event_active", "n_concurrent", "has_road_closure", "road_closure_count",
+]
+ctx_df = pd.DataFrame(context_raw, index=ts, columns=ctx_cols)
+
+# Denormalize key columns for threshold checks
+ctx_df["precip_raw"]       = ctx_df["precip"]       * scaler_ctx.scale_[1] + scaler_ctx.mean_[1]
+ctx_df["temp_raw"]         = ctx_df["temp"]          * scaler_ctx.scale_[0] + scaler_ctx.mean_[0]
+ctx_df["wind_raw"]         = ctx_df["wind"]          * scaler_ctx.scale_[2] + scaler_ctx.mean_[2]
+ctx_df["event_active_raw"] = ctx_df["event_active"]  * scaler_ctx.scale_[13]
+
+# Daily max of each signal
+daily_precip = ctx_df["precip_raw"].resample("D").max()
+daily_temp   = ctx_df["temp_raw"].resample("D").min()
+daily_wind   = ctx_df["wind_raw"].resample("D").max()
+daily_event  = ctx_df["event_active_raw"].resample("D").max()
+
+# Cause classification per day (priority order)
+COVID_DATES = pd.date_range("2020-04-01", "2020-05-31")
+HOLIDAYS = {
+    pd.Timestamp("2020-11-26"): "Thanksgiving",
+    pd.Timestamp("2020-12-25"): "Christmas",
+    pd.Timestamp("2021-01-20"): "MLK Day",
+    pd.Timestamp("2021-09-07"): "Labor Day",
+}
+WINTER_STORM = pd.Timestamp("2021-02-15")
+
+CAUSE_COLORS = {
+    "COVID lockdown":  "#7C3AED",   # purple
+    "Heavy rain":      "#0EA5E9",   # sky blue
+    "Winter Storm Uri":"#1E40AF",   # dark blue
+    "Holiday":         "#D97706",   # amber
+    "Event + rain":    "#059669",   # emerald
+    "Extreme heat":    "#DC2626",   # red
+    "High wind":       "#6B7280",   # grey
+}
+
+def classify_cause(date):
+    d = pd.Timestamp(date)
+    if d in HOLIDAYS:
+        return "Holiday"
+    if d == WINTER_STORM:
+        return "Winter Storm Uri"
+    if d in COVID_DATES:
+        return "COVID lockdown"
+    if daily_event.get(d, 0) > 0.5 and daily_precip.get(d, 0) > 0.3:
+        return "Event + rain"
+    if daily_precip.get(d, 0) > 2.0:
+        return "Heavy rain"
+    if daily_temp.get(d, 99) < 50:
+        return "Winter Storm Uri"
+    if daily_wind.get(d, 0) > 18:
+        return "High wind"
+    if daily_temp.get(d, 0) > 85:
+        return "Extreme heat"
+    return "Heavy rain"   # fallback for remaining weather anomalies
 
 resid = result.resid.dropna()
-threshold = resid.abs().quantile(0.95)          # top 5% residuals = anomalies
+threshold = resid.abs().quantile(0.95)
 is_anomaly = resid.abs() > threshold
+anomaly_idx = resid[is_anomaly].index
 
-fig, axes = plt.subplots(2, 1, figsize=(14, 6), sharex=True,
-                         gridspec_kw={"height_ratios": [2, 1]})
+# Assign cause to each anomaly date
+anomaly_causes = {d: classify_cause(d) for d in anomaly_idx}
+
+# Key labels to annotate (one representative per cluster, to avoid clutter)
+# Groups: COVID cluster → one label; individual notable dates labelled directly
+ANNOTATIONS = {
+    pd.Timestamp("2020-04-15"): ("COVID\nlockdown", "below"),
+    pd.Timestamp("2020-05-16"): ("Heavy\nrain", "above"),
+    pd.Timestamp("2020-11-15"): ("High\nwind", "above"),
+    pd.Timestamp("2020-11-26"): ("Thanksgiving", "below"),
+    pd.Timestamp("2020-12-25"): ("Christmas", "above"),
+    pd.Timestamp("2021-01-20"): ("MLK Day", "below"),
+    pd.Timestamp("2021-02-15"): ("Winter\nStorm Uri", "above"),
+    pd.Timestamp("2021-06-03"): ("Heavy\nrain", "above"),
+    pd.Timestamp("2021-08-02"): ("Heavy\nrain", "above"),
+    pd.Timestamp("2021-08-15"): ("Event\n+ rain", "below"),
+    pd.Timestamp("2021-09-07"): ("Labor\nDay", "above"),
+}
+
+fig, axes = plt.subplots(2, 1, figsize=(16, 7), sharex=True,
+                         gridspec_kw={"height_ratios": [2.2, 1]})
 
 ax = axes[0]
-ax.plot(daily_avg.index, daily_avg.values, color=BLUE, linewidth=0.9, label="Observed speed")
+ax.plot(daily_avg.index, daily_avg.values, color=BLUE, linewidth=0.9,
+        label="Observed speed", zorder=2)
 ax.plot(result.trend.index, result.trend.values, color=ORANGE,
         linewidth=2, label="STL trend", zorder=3)
-ax.scatter(daily_avg.index[is_anomaly], daily_avg.values[is_anomaly],
-           color=RED, s=25, zorder=4, label=f"Anomaly day (|resid| > 95th pct)")
-for label, (color, (t0, t1)) in SPLIT_COLORS.items():
-    ax.axvspan(t0, t1, color=color, alpha=0.35)
-ax.set_ylabel("Speed (mph)")
-ax.set_title("Austin Traffic Anomaly Periods — STL Residual Analysis",
-             fontsize=13, fontweight="bold")
-ax.legend(fontsize=9)
 
+# Plot anomaly dots color-coded by cause
+plotted_causes = set()
+for d in anomaly_idx:
+    cause = anomaly_causes[d]
+    c     = CAUSE_COLORS[cause]
+    lbl   = cause if cause not in plotted_causes else "_nolegend_"
+    ax.scatter(d, daily_avg.loc[d], color=c, s=55, zorder=5,
+               edgecolors="white", linewidths=0.5, label=lbl)
+    plotted_causes.add(cause)
+
+# Annotations with arrows
+for d, (txt, pos) in ANNOTATIONS.items():
+    if d not in daily_avg.index:
+        continue
+    y_val = daily_avg.loc[d]
+    dy    = 1.8 if pos == "above" else -1.8
+    ax.annotate(
+        txt, xy=(d, y_val), xytext=(d, y_val + dy * 1.5),
+        fontsize=7, ha="center", va="bottom" if pos == "above" else "top",
+        color=CAUSE_COLORS[anomaly_causes[d]],
+        arrowprops=dict(arrowstyle="-", color=CAUSE_COLORS[anomaly_causes[d]],
+                        lw=0.8),
+    )
+
+for lbl, (bg, (t0, t1)) in SPLIT_COLORS.items():
+    ax.axvspan(t0, t1, color=bg, alpha=0.3)
+
+ax.set_ylabel("Speed (mph)")
+ax.set_title("Austin Traffic Anomaly Periods — Causes Identified via STL Residuals + Context Features",
+             fontsize=12, fontweight="bold")
+ax.legend(loc="upper right", fontsize=8, ncol=4,
+          title="Anomaly cause", title_fontsize=8)
+
+# Bottom panel — residual bars, colored by cause
 ax2 = axes[1]
-ax2.bar(resid.index, resid.abs().values, width=1,
-        color=[RED if v else GREY for v in is_anomaly], alpha=0.8)
+for d, val in resid.items():
+    color = CAUSE_COLORS.get(anomaly_causes.get(d), GREY) if d in anomaly_idx else GREY
+    ax2.bar(d, abs(val), width=1, color=color,
+            alpha=0.85 if d in anomaly_idx else 0.4)
 ax2.axhline(threshold, color=RED, linewidth=1.2, linestyle="--",
             label=f"95th pct threshold ({threshold:.2f} mph)")
-for label, (color, (t0, t1)) in SPLIT_COLORS.items():
-    ax2.axvspan(t0, t1, color=color, alpha=0.35)
+for lbl, (bg, (t0, t1)) in SPLIT_COLORS.items():
+    ax2.axvspan(t0, t1, color=bg, alpha=0.3)
 ax2.set_ylabel("|Residual| (mph)")
 ax2.legend(fontsize=9)
 ax2.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
