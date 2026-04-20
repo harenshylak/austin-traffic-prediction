@@ -34,7 +34,6 @@ PLOT_LAYOUT = dict(
     yaxis=dict(showgrid=True, gridcolor="#f1f5f9",
                tickfont=dict(color="#1e293b"), title_font=dict(color="#1e293b")),
     legend=dict(font=dict(color="#1e293b")),
-    title=dict(font=dict(color="#1e293b")),
 )
 
 # ── constants ──────────────────────────────────────────────────────────────────
