@@ -12,6 +12,7 @@ import folium
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
 import torch
 from streamlit_folium import st_folium
@@ -23,18 +24,44 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── global plotly font fix (dark text on white bg) ────────────────────────────
-PLOT_FONT = dict(color="#1e293b", size=12)
-PLOT_LAYOUT = dict(
+# ── force all plotly text to black on white background ────────────────────────
+_black = "black"
+_tpl = go.layout.Template()
+_tpl.layout.update(
     plot_bgcolor="white",
     paper_bgcolor="white",
-    font=PLOT_FONT,
-    xaxis=dict(showgrid=True, gridcolor="#f1f5f9", zeroline=False,
-               tickfont=dict(color="#1e293b"), title_font=dict(color="#1e293b")),
-    yaxis=dict(showgrid=True, gridcolor="#f1f5f9",
-               tickfont=dict(color="#1e293b"), title_font=dict(color="#1e293b")),
-    legend=dict(font=dict(color="#1e293b")),
+    font=dict(color=_black, size=12, family="sans-serif"),
+    title=dict(font=dict(color=_black)),
+    xaxis=dict(
+        color=_black,
+        tickfont=dict(color=_black),
+        title_font=dict(color=_black),
+        linecolor="#cbd5e1",
+        gridcolor="#f1f5f9",
+        zeroline=False,
+    ),
+    yaxis=dict(
+        color=_black,
+        tickfont=dict(color=_black),
+        title_font=dict(color=_black),
+        linecolor="#cbd5e1",
+        gridcolor="#f1f5f9",
+    ),
+    legend=dict(
+        font=dict(color=_black),
+        title_font=dict(color=_black),
+        bgcolor="rgba(255,255,255,0.8)",
+        bordercolor="#cbd5e1",
+        borderwidth=1,
+    ),
+    coloraxis=dict(colorbar=dict(tickfont=dict(color=_black),
+                                  title_font=dict(color=_black))),
+    annotationdefaults=dict(font=dict(color=_black)),
 )
+pio.templates["austin"] = _tpl
+pio.templates.default   = "austin"
+
+PLOT_LAYOUT = dict(plot_bgcolor="white", paper_bgcolor="white")
 
 # ── constants ──────────────────────────────────────────────────────────────────
 GRAPH_DIR = "data/graph"

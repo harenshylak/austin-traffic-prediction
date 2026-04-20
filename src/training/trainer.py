@@ -82,18 +82,10 @@ def build_model(cfg: dict, N: int = None) -> nn.Module:
     if model_name == "lstm_only":
         from src.models.lstm_baseline import build_from_config
         return build_from_config(cfg)
-    if model_name == "gcn_lstm":
-        from src.models.gcn_lstm import build_from_config
-        return build_from_config(cfg)
     if model_name == "lstm_context":
         from src.models.lstm_context import build_from_config
         return build_from_config(cfg)
-    if model_name == "full_hmstgn":
-        from src.models.hmstgn import build_from_config
-        if N is None:
-            raise ValueError("N (number of sensors) must be provided for full_hmstgn")
-        return build_from_config(cfg, N)
-    raise ValueError(f"Unknown model name: {model_name!r}. Add it to trainer.build_model().")
+    raise ValueError(f"Unknown model name: {model_name!r}. Valid options: lstm_only, lstm_context.")
 
 
 # ---------------------------------------------------------------------------
@@ -124,42 +116,24 @@ def run_epoch(
 
     # Detect model type by forward signature
     import inspect
-    sig_params     = set(inspect.signature(model.forward).parameters.keys())
-    is_hmstgn      = "event_flag" in sig_params               # full HM-STGN
-    is_lstm_ctx    = "context" in sig_params and not is_hmstgn # LSTMWithContext
-    needs_adj      = "adjacency" in sig_params and not is_hmstgn  # GCN-based
+    sig_params  = set(inspect.signature(model.forward).parameters.keys())
+    is_lstm_ctx = "context" in sig_params   # LSTMWithContext
 
     ctx = torch.enable_grad() if is_train else torch.no_grad()
     with ctx:
         for batch in loader:
-            traffic    = batch["traffic"].to(device)    # (B, T, N, F)
-            target     = batch["target"].to(device)     # (B, H, N, 1)
+            traffic = batch["traffic"].to(device)   # (B, T, N, F)
+            target  = batch["target"].to(device)    # (B, H, N, 1)
 
-            if is_hmstgn:
-                context    = batch["context"].to(device)     # (B, T, K)
-                adjacency  = batch["adjacency"].to(device)   # (B, N, N)
-                event_flag = batch["event_flag"].to(device)  # (B, 1)
-
-                out  = model(traffic, context, adjacency, event_flag, target=target)
-                loss = out["loss"]
-                preds = out["pred_speed"]
-
-            elif is_lstm_ctx:
-                context = batch["context"].to(device)        # (B, T, K)
-                tfr = teacher_forcing_ratio if is_train else 0.0
-                preds = model(traffic, context, target=target, teacher_forcing_ratio=tfr)
-                loss = nn.HuberLoss(delta=1.0)(preds, target)
-
-            elif needs_adj:
-                adjacency = batch["adjacency"].to(device)
-                tfr = teacher_forcing_ratio if is_train else 0.0
-                preds = model(traffic, adjacency, target=target, teacher_forcing_ratio=tfr)
-                loss = nn.HuberLoss(delta=1.0)(preds, target)
-
+            if is_lstm_ctx:
+                context = batch["context"].to(device)   # (B, T, K)
+                tfr     = teacher_forcing_ratio if is_train else 0.0
+                preds   = model(traffic, context, target=target, teacher_forcing_ratio=tfr)
+                loss    = nn.HuberLoss(delta=1.0)(preds, target)
             else:
-                tfr = teacher_forcing_ratio if is_train else 0.0
+                tfr   = teacher_forcing_ratio if is_train else 0.0
                 preds = model(traffic, target=target, teacher_forcing_ratio=tfr)
-                loss = nn.HuberLoss(delta=1.0)(preds, target)
+                loss  = nn.HuberLoss(delta=1.0)(preds, target)
 
             if is_train:
                 optimizer.zero_grad()
@@ -206,7 +180,6 @@ def train(config_path: str) -> nn.Module:
 
     eval_horizons = cfg["data"]["eval_horizons"]
 
-    # Model (need N = number of sensors for HM-STGN)
     import json as _json
     with open(os.path.join(graph_dir, "sensor_order.json")) as f:
         N = len(_json.load(f))
